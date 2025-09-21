@@ -1,59 +1,165 @@
-# Tên của workflow
-name: Trích xuất phân vùng từ OTA
+name: Extract Boot Image from OTA
 
-# Kích hoạt thủ công
 on:
   workflow_dispatch:
     inputs:
-      ota_url:
-        description: 'Link OTA (zip) hoặc payload.bin'
-        required: true
-        type: string
-      partitions:
-        description: 'Tên phân vùng cần trích xuất (vd: boot,vbmeta)'
+      partition_selection:
+        description: 'Partition(s) to extract'
         required: true
         default: 'boot'
+        type: choice
+        options:
+          - 'boot'
+          - 'init_boot'
+          - 'boot,init_boot'
+          - 'boot,dtbo,vbmeta'
+          - 'boot,init_boot,dtbo,vbmeta'
+          - 'recovery'
+          - 'vendor_boot'
+          - 'custom'
+      
+      custom_partitions:
+        description: 'Custom partitions (comma-separated, only if "custom" is selected above)'
+        required: false
+        type: string
+        
+      ota_url:
+        description: 'OTA Download URL (supports direct payload.bin or zip containing payload.bin)'
+        required: true
+        type: string
+        
+      artifact_name:
+        description: 'Output artifact name (optional)'
+        required: false
+        default: 'extracted-partitions'
         type: string
 
-# Các công việc sẽ được thực thi
 jobs:
-  extract:
-    name: Tải và Trích xuất Image
+  extract-partitions:
     runs-on: ubuntu-latest
-
+    
     steps:
-      # Bước 1: Checkout mã nguồn từ repository của bạn
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Bước 2: Cài đặt Python và kích hoạt cache
-      - name: Cài đặt Python và Cache
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-
-      # Bước 3: Cài đặt payload-dumper từ mã nguồn local
-      - name: Cài đặt payload-dumper từ repo
-        run: pip install .
-
-      # Bước 4: Chạy lệnh trích xuất với các giá trị đã nhập
-      # Đảm bảo các biến ${{...}} nằm trong dấu ngoặc kép để xử lý các trường hợp đặc biệt
-      - name: Trích xuất các phân vùng được yêu cầu
-        run: |
-          echo "Bắt đầu trích xuất phân vùng '${{ github.inputs.partitions }}' từ URL..."
-          payload_dumper --partitions "${{ github.inputs.partitions }}" "${{ github.inputs.ota_url }}"
-
-      # Bước 5: Tải lên các file đã trích xuất làm artifact
-      - name: Tải lên (Upload) các file kết quả
-        uses: actions/upload-artifact@v4
-        with:
-          name: extracted-images-${{ github.run_id }}
-          path: output/
-
-      # Bước 6: Dọn dẹp thư mục output để giải phóng dung lượng
-      - name: Dọn dẹp không gian đĩa
-        if: always()
-        run: |
-          echo "Dọn dẹp thư mục output..."
-          rm -rf output
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install payload-dumper dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install git+https://github.com/${{ github.repository }}.git
+        
+    - name: Validate input parameters
+      run: |
+        echo "=== Workflow Configuration ==="
+        echo "Repository: ${{ github.repository }}"
+        echo "Partition Selection: ${{ github.event.inputs.partition_selection }}"
+        echo "Custom Partitions: ${{ github.event.inputs.custom_partitions }}"
+        echo "OTA URL: ${{ github.event.inputs.ota_url }}"
+        echo "Artifact Name: ${{ github.event.inputs.artifact_name }}"
+        echo "=============================="
+        
+        # Validate URL format
+        if [[ ! "${{ github.event.inputs.ota_url }}" =~ ^https?:// ]]; then
+          echo "❌ Error: Invalid URL format. Must start with http:// or https://"
+          exit 1
+        fi
+        
+        # Set partitions based on selection
+        if [[ "${{ github.event.inputs.partition_selection }}" == "custom" ]]; then
+          if [[ -z "${{ github.event.inputs.custom_partitions }}" ]]; then
+            echo "❌ Error: Custom partitions cannot be empty when 'custom' is selected"
+            exit 1
+          fi
+          echo "PARTITIONS=${{ github.event.inputs.custom_partitions }}" >> $GITHUB_ENV
+        else
+          echo "PARTITIONS=${{ github.event.inputs.partition_selection }}" >> $GITHUB_ENV
+        fi
+        
+        echo "✅ Validation completed. Extracting partitions: $PARTITIONS"
+        
+    - name: Create extraction directory
+      run: |
+        mkdir -p extracted_output
+        cd extracted_output
+        echo "Working directory: $(pwd)"
+        
+    - name: Extract partitions from OTA
+      run: |
+        cd extracted_output
+        echo "🚀 Starting extraction process..."
+        echo "Target partitions: ${{ env.PARTITIONS }}"
+        echo "Source URL: ${{ github.event.inputs.ota_url }}"
+        
+        # Execute payload dumper with enhanced error handling
+        set -e
+        payload_dumper --partitions "${{ env.PARTITIONS }}" "${{ github.event.inputs.ota_url }}" 2>&1 | tee extraction.log
+        
+        echo "📋 Extraction completed. Output files:"
+        ls -la
+        
+        # Verify extracted files
+        echo "🔍 Verifying extracted partitions..."
+        for partition in $(echo "${{ env.PARTITIONS }}" | tr ',' ' '); do
+          if [[ -f "${partition}.img" ]]; then
+            file_size=$(stat -c%s "${partition}.img")
+            echo "✅ ${partition}.img - Size: ${file_size} bytes"
+          else
+            echo "⚠️  Warning: ${partition}.img not found"
+          fi
+        done
+        
+    - name: Generate extraction summary
+      run: |
+        cd extracted_output
+        echo "# Extraction Summary" > summary.md
+        echo "" >> summary.md
+        echo "## Configuration" >> summary.md
+        echo "- **OTA Source**: ${{ github.event.inputs.ota_url }}" >> summary.md
+        echo "- **Extracted Partitions**: ${{ env.PARTITIONS }}" >> summary.md
+        echo "- **Extraction Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> summary.md
+        echo "- **Workflow Run**: ${{ github.run_id }}" >> summary.md
+        echo "" >> summary.md
+        echo "## Extracted Files" >> summary.md
+        
+        for img_file in *.img; do
+          if [[ -f "$img_file" ]]; then
+            file_size=$(stat -c%s "$img_file")
+            file_size_mb=$((file_size / 1024 / 1024))
+            echo "- **${img_file}**: ${file_size_mb} MB (${file_size} bytes)" >> summary.md
+          fi
+        done
+        
+        echo "" >> summary.md
+        echo "## SHA256 Checksums" >> summary.md
+        echo "\`\`\`" >> summary.md
+        sha256sum *.img >> summary.md 2>/dev/null || echo "No image files to checksum" >> summary.md
+        echo "\`\`\`" >> summary.md
+        
+        cat summary.md
+        
+    - name: Upload extracted partitions
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ github.event.inputs.artifact_name }}
+        path: |
+          extracted_output/*.img
+          extracted_output/summary.md
+          extracted_output/extraction.log
+        retention-days: 30
+        compression-level: 6
+        
+    - name: Display completion status
+      run: |
+        echo "🎉 Extraction workflow completed successfully!"
+        echo ""
+        echo "📦 Artifacts uploaded:"
+        echo "   Name: ${{ github.event.inputs.artifact_name }}"
+        echo "   Contents: Extracted partition images + metadata"
+        echo "   Retention: 30 days"
+        echo ""
+        echo "🔗 Download artifacts from the Actions tab of this repository."
