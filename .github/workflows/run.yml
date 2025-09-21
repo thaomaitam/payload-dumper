@@ -23,12 +23,10 @@ jobs:
 
     steps:
       # Bước 1: Checkout mã nguồn từ repository của bạn
-      # Bắt buộc phải có bước này để có thể cài đặt từ local
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # Bước 2: Cài đặt Python và kích hoạt cache
-      # 'cache: pip' sẽ tự động lưu và phục hồi các gói đã tải, giúp chạy nhanh hơn
       - name: Cài đặt Python và Cache
         uses: actions/setup-python@v5
         with:
@@ -36,15 +34,15 @@ jobs:
           cache: 'pip'
 
       # Bước 3: Cài đặt payload-dumper từ mã nguồn local
-      # Lệnh 'pip install .' sẽ cài đặt gói từ pyproject.toml trong repo của bạn
       - name: Cài đặt payload-dumper từ repo
         run: pip install .
 
       # Bước 4: Chạy lệnh trích xuất với các giá trị đã nhập
+      # Đảm bảo các biến ${{...}} nằm trong dấu ngoặc kép để xử lý các trường hợp đặc biệt
       - name: Trích xuất các phân vùng được yêu cầu
         run: |
-          echo "Bắt đầu trích xuất phân vùng '${{ github.inputs.partitions }}' từ URL: ${{ github.inputs.ota_url }}"
-          payload_dumper --partitions ${{ github.inputs.partitions }} ${{ github.inputs.ota_url }}
+          echo "Bắt đầu trích xuất phân vùng '${{ github.inputs.partitions }}' từ URL..."
+          payload_dumper --partitions "${{ github.inputs.partitions }}" "${{ github.inputs.ota_url }}"
 
       # Bước 5: Tải lên các file đã trích xuất làm artifact
       - name: Tải lên (Upload) các file kết quả
@@ -54,9 +52,8 @@ jobs:
           path: output/
 
       # Bước 6: Dọn dẹp thư mục output để giải phóng dung lượng
-      # Bước này chạy sau khi đã upload thành công
       - name: Dọn dẹp không gian đĩa
-        if: always() # Luôn chạy bước này, dù các bước trước thành công hay thất bại
+        if: always()
         run: |
           echo "Dọn dẹp thư mục output..."
           rm -rf output
