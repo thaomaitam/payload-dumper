@@ -95,23 +95,101 @@ jobs:
         echo "Target partitions: ${{ env.PARTITIONS }}"
         echo "Source URL: ${{ github.event.inputs.ota_url }}"
         
-        # Execute payload dumper with enhanced error handling
-        set -e
-        payload_dumper --partitions "${{ env.PARTITIONS }}" "${{ github.event.inputs.ota_url }}" 2>&1 | tee extraction.log
+        # Enhanced extraction with fallback mechanisms
+        EXTRACTION_SUCCESS=false
         
-        echo "📋 Extraction completed. Output files:"
-        ls -la
-        
-        # Verify extracted files
-        echo "🔍 Verifying extracted partitions..."
-        for partition in $(echo "${{ env.PARTITIONS }}" | tr ',' ' '); do
-          if [[ -f "${partition}.img" ]]; then
-            file_size=$(stat -c%s "${partition}.img")
-            echo "✅ ${partition}.img - Size: ${file_size} bytes"
+        # Method 1: Direct payload_dumper (original approach)
+        echo "🔄 Method 1: Direct payload extraction..."
+        if payload_dumper --partitions "${{ env.PARTITIONS }}" "${{ github.event.inputs.ota_url }}" 2>&1 | tee extraction.log; then
+          EXTRACTION_SUCCESS=true
+          echo "✅ Direct extraction successful"
+        else
+          echo "❌ Direct extraction failed, trying alternative methods..."
+          
+          # Method 2: Download and extract locally
+          echo "🔄 Method 2: Local download and extraction..."
+          echo "Downloading OTA package..."
+          
+          # Use wget with resume capability and progress bar
+          wget -c --progress=bar:force "${{ github.event.inputs.ota_url }}" -O ota_package.zip 2>&1 | tee -a extraction.log
+          
+          if [[ -f "ota_package.zip" ]]; then
+            echo "✅ OTA package downloaded successfully"
+            file_size=$(stat -c%s "ota_package.zip")
+            echo "📦 Package size: $((file_size / 1024 / 1024)) MB"
+            
+            # Check if it's a ZIP file
+            if unzip -l ota_package.zip 2>/dev/null | grep -q "payload.bin"; then
+              echo "🔍 Found payload.bin in ZIP archive"
+              
+              # Extract payload.bin from ZIP
+              unzip -j ota_package.zip "*/payload.bin" -d . 2>&1 | tee -a extraction.log || \
+              unzip -j ota_package.zip "payload.bin" -d . 2>&1 | tee -a extraction.log
+              
+              if [[ -f "payload.bin" ]]; then
+                echo "✅ payload.bin extracted from ZIP"
+                
+                # Validate payload.bin magic header
+                if head -c 4 payload.bin | xxd -p | grep -q "43724155"; then
+                  echo "✅ Valid payload.bin magic header (CrAU) detected"
+                  
+                  # Extract partitions from local payload.bin
+                  if payload_dumper --partitions "${{ env.PARTITIONS }}" payload.bin 2>&1 | tee -a extraction.log; then
+                    EXTRACTION_SUCCESS=true
+                    echo "✅ Local payload extraction successful"
+                  fi
+                else
+                  echo "❌ Invalid payload.bin magic header"
+                  echo "🔍 Header dump:"
+                  head -c 16 payload.bin | xxd
+                fi
+              fi
+            else
+              echo "❌ payload.bin not found in ZIP archive"
+              echo "🔍 ZIP contents:"
+              unzip -l ota_package.zip | head -20
+            fi
           else
-            echo "⚠️  Warning: ${partition}.img not found"
+            echo "❌ Failed to download OTA package"
           fi
-        done
+        fi
+        
+        # Final verification
+        if [[ "$EXTRACTION_SUCCESS" == "true" ]]; then
+          echo "📋 Extraction completed successfully. Output files:"
+          ls -la
+          
+          # Verify extracted files
+          echo "🔍 Verifying extracted partitions..."
+          for partition in $(echo "${{ env.PARTITIONS }}" | tr ',' ' '); do
+            if [[ -f "${partition}.img" ]]; then
+              file_size=$(stat -c%s "${partition}.img")
+              echo "✅ ${partition}.img - Size: ${file_size} bytes ($((file_size / 1024 / 1024)) MB)"
+              
+              # Additional validation for boot.img
+              if [[ "$partition" == "boot" ]] && [[ -f "boot.img" ]]; then
+                echo "🔍 Boot image analysis:"
+                file boot.img
+                # Check for Android boot magic
+                if head -c 8 boot.img | grep -q "ANDROID"; then
+                  echo "✅ Valid Android boot image detected"
+                else
+                  echo "⚠️ Unexpected boot image format"
+                fi
+              fi
+            else
+              echo "❌ Error: ${partition}.img not found"
+              exit 1
+            fi
+          done
+        else
+          echo "❌ All extraction methods failed"
+          echo "🔍 Troubleshooting information:"
+          echo "URL: ${{ github.event.inputs.ota_url }}"
+          echo "Working directory contents:"
+          ls -la
+          exit 1
+        fi
         
     - name: Generate extraction summary
       run: |
