@@ -1,60 +1,62 @@
-# Tên của workflow, sẽ hiển thị trong tab Actions của GitHub
+# Tên của workflow
 name: Trích xuất phân vùng từ OTA
 
-# Cấu hình cách kích hoạt workflow
+# Kích hoạt thủ công
 on:
-  # Cho phép chạy workflow này thủ công từ tab Actions
   workflow_dispatch:
-    # Các ô nhập liệu sẽ hiện ra khi bạn bấm "Run workflow"
     inputs:
-      # Ô nhập liệu cho URL
       ota_url:
         description: 'Link OTA (zip) hoặc payload.bin'
         required: true
         type: string
-      # Ô nhập liệu cho các phân vùng
       partitions:
         description: 'Tên phân vùng cần trích xuất (vd: boot,vbmeta)'
         required: true
-        default: 'boot' # Mặc định sẽ là 'boot' như bạn yêu cầu
+        default: 'boot'
         type: string
 
-# Các công việc (jobs) sẽ được thực thi
+# Các công việc sẽ được thực thi
 jobs:
   extract:
-    # Tên của job
     name: Tải và Trích xuất Image
-    # Chạy trên một máy ảo Ubuntu phiên bản mới nhất
     runs-on: ubuntu-latest
 
-    # Các bước (steps) thực thi tuần tự
     steps:
-      # Bước 1: Checkout code của bạn (một bước tiêu chuẩn)
+      # Bước 1: Checkout mã nguồn từ repository của bạn
+      # Bắt buộc phải có bước này để có thể cài đặt từ local
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Bước 2: Cài đặt môi trường Python 3
-      - name: Cài đặt Python
+      # Bước 2: Cài đặt Python và kích hoạt cache
+      # 'cache: pip' sẽ tự động lưu và phục hồi các gói đã tải, giúp chạy nhanh hơn
+      - name: Cài đặt Python và Cache
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # Yêu cầu Python >= 3.8
+          python-version: '3.10'
+          cache: 'pip'
 
-      # Bước 3: Cài đặt công cụ payload-dumper từ GitHub
-      # Lệnh cài đặt được lấy trực tiếp từ file README.md
-      - name: Cài đặt payload-dumper
-        run: pip install git+https://github.com/5ec1cff/payload-dumper
+      # Bước 3: Cài đặt payload-dumper từ mã nguồn local
+      # Lệnh 'pip install .' sẽ cài đặt gói từ pyproject.toml trong repo của bạn
+      - name: Cài đặt payload-dumper từ repo
+        run: pip install .
 
       # Bước 4: Chạy lệnh trích xuất với các giá trị đã nhập
-      # Công cụ sẽ tự động tải và xử lý file từ URL
       - name: Trích xuất các phân vùng được yêu cầu
         run: |
-          echo "Bắt đầu trích xuất phân vùng '${{ github.inputs.partitions }}' từ URL..."
+          echo "Bắt đầu trích xuất phân vùng '${{ github.inputs.partitions }}' từ URL: ${{ github.inputs.ota_url }}"
           payload_dumper --partitions ${{ github.inputs.partitions }} ${{ github.inputs.ota_url }}
 
       # Bước 5: Tải lên các file đã trích xuất làm artifact
-      # Các file này sẽ nằm trong thư mục 'output' do công cụ tạo ra
       - name: Tải lên (Upload) các file kết quả
         uses: actions/upload-artifact@v4
         with:
-          name: extracted-images-${{ github.run_id }} # Tên của file zip chứa kết quả
-          path: output/ # Đường dẫn đến thư mục chứa các file đã trích xuất
+          name: extracted-images-${{ github.run_id }}
+          path: output/
+
+      # Bước 6: Dọn dẹp thư mục output để giải phóng dung lượng
+      # Bước này chạy sau khi đã upload thành công
+      - name: Dọn dẹp không gian đĩa
+        if: always() # Luôn chạy bước này, dù các bước trước thành công hay thất bại
+        run: |
+          echo "Dọn dẹp thư mục output..."
+          rm -rf output
