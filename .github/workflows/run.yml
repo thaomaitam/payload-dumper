@@ -1,330 +1,89 @@
-name: Extract Boot Image from OTA
+# Tên của workflow, hiển thị trên tab Actions
+name: Trích xuất phân vùng từ OTA (Tối ưu)
 
 on:
   workflow_dispatch:
     inputs:
       partition_selection:
-        description: 'Partition(s) to extract'
+        description: 'Chọn phân vùng cần trích xuất'
         required: true
         default: 'boot'
         type: choice
         options:
           - 'boot'
           - 'init_boot'
-          - 'boot,init_boot'
-          - 'boot,dtbo,vbmeta'
-          - 'boot,init_boot,dtbo,vbmeta'
-          - 'recovery'
           - 'vendor_boot'
+          - 'recovery'
+          - 'boot,dtbo,vbmeta'
           - 'custom'
       
       custom_partitions:
-        description: 'Custom partitions (comma-separated, only if "custom" is selected above)'
+        description: 'Tên phân vùng tùy chỉnh (nếu chọn "custom")'
         required: false
         type: string
         
       ota_url:
-        description: 'OTA Download URL (supports direct payload.bin or zip containing payload.bin)'
+        description: 'URL của file OTA (zip hoặc payload.bin)'
         required: true
         type: string
-        
-      artifact_name:
-        description: 'Output artifact name (optional)'
-        required: false
-        default: 'extracted-partitions'
-        type: string
-
-env:
-  PYTHONUNBUFFERED: 1
 
 jobs:
-  extract-partitions:
+  extract-and-upload:
+    name: Trích xuất và Tải lên Phân vùng
     runs-on: ubuntu-latest
     
     steps:
+    # Bước 1: Checkout mã nguồn từ repository của bạn
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Set up Python environment
-      uses: actions/setup-python@v4
+    # Bước 2: Cài đặt môi trường Python và kích hoạt cache để chạy nhanh hơn
+    - name: Cài đặt Python và Cache
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
         
-    - name: Install payload-dumper from source
+    # Bước 3: Cài đặt công cụ payload-dumper từ chính mã nguồn của repo
+    - name: Cài đặt payload-dumper
+      run: pip install .
+        
+    # Bước 4: Chuẩn bị tham số và thực thi trích xuất
+    - name: Chuẩn bị và Trích xuất Phân vùng
+      id: extract
       run: |
-        echo "🔧 Installing payload-dumper dependencies..."
-        python -m pip install --upgrade pip
-        
-        # Install from current repository source
-        pip install -e .
-        
-        # Verify installation
-        payload_dumper --help || echo "Installation verification failed"
-        
-    - name: Validate and configure parameters
-      id: config
-      run: |
-        echo "=== Workflow Configuration ==="
-        echo "Repository: ${{ github.repository }}"
-        echo "Partition Selection: ${{ github.event.inputs.partition_selection }}"
-        echo "Custom Partitions: ${{ github.event.inputs.custom_partitions }}"
-        echo "OTA URL: ${{ github.event.inputs.ota_url }}"
-        echo "Artifact Name: ${{ github.event.inputs.artifact_name }}"
-        echo "=============================="
-        
-        # Validate URL format
-        if [[ ! "${{ github.event.inputs.ota_url }}" =~ ^https?:// ]]; then
-          echo "❌ Error: Invalid URL format. Must start with http:// or https://"
-          exit 1
-        fi
-        
-        # Configure partitions based on selection
+        # Xác định các phân vùng mục tiêu dựa trên lựa chọn của người dùng
         if [[ "${{ github.event.inputs.partition_selection }}" == "custom" ]]; then
+          # Kiểm tra xem người dùng có nhập tên phân vùng tùy chỉnh không
           if [[ -z "${{ github.event.inputs.custom_partitions }}" ]]; then
-            echo "❌ Error: Custom partitions cannot be empty when 'custom' is selected"
+            echo "❌ Lỗi: Phải nhập tên phân vùng khi chọn 'custom'."
             exit 1
           fi
           TARGET_PARTITIONS="${{ github.event.inputs.custom_partitions }}"
         else
           TARGET_PARTITIONS="${{ github.event.inputs.partition_selection }}"
         fi
+
+        echo "✅ Các phân vùng mục tiêu: ${TARGET_PARTITIONS}"
+        echo "🚀 Bắt đầu trích xuất từ URL: ${{ github.event.inputs.ota_url }}"
         
-        # Export to environment
-        echo "TARGET_PARTITIONS=${TARGET_PARTITIONS}" >> $GITHUB_ENV
-        echo "OTA_URL=${{ github.event.inputs.ota_url }}" >> $GITHUB_ENV
-        echo "ARTIFACT_NAME=${{ github.event.inputs.artifact_name }}" >> $GITHUB_ENV
+        # Đây là lệnh duy nhất cần thiết, tuân thủ 100% readme.md
+        # Công cụ sẽ tự động xử lý URL, file zip và trích xuất.
+        payload_dumper --partitions "${TARGET_PARTITIONS}" "${{ github.event.inputs.ota_url }}"
         
-        echo "✅ Configuration completed. Target partitions: ${TARGET_PARTITIONS}"
-        
-    - name: Create extraction workspace
-      run: |
-        mkdir -p extracted_output
-        cd extracted_output
-        echo "📁 Workspace created: $(pwd)"
-        
-    - name: Execute partition extraction
-      working-directory: extracted_output
-      run: |
-        echo "🚀 Initiating extraction process..."
-        echo "Target partitions: ${TARGET_PARTITIONS}"
-        echo "Source URL: ${OTA_URL}"
-        
-        # Initialize extraction status
-        EXTRACTION_SUCCESS=false
-        
-        # Primary extraction method: Direct streaming
-        echo "🔄 Attempting direct payload extraction..."
-        if timeout 1800 payload_dumper --partitions "${TARGET_PARTITIONS}" "${OTA_URL}" 2>&1 | tee extraction_primary.log; then
-          EXTRACTION_SUCCESS=true
-          echo "✅ Direct extraction successful"
-        else
-          echo "⚠️ Direct extraction failed. Initiating fallback protocol..."
-          
-          # Fallback method: Local download and extraction
-          echo "🔄 Executing fallback: Local download strategy..."
-          
-          # Download with robust error handling
-          echo "📥 Downloading OTA package..."
-          if timeout 3600 wget -c --progress=bar:force:noscroll --tries=3 --waitretry=5 \
-             --header="User-Agent: Mozilla/5.0 (Linux; Android 10)" \
-             "${OTA_URL}" -O ota_package.zip 2>&1 | tee download.log; then
-            
-            echo "✅ Download completed successfully"
-            
-            # Verify download integrity
-            if [[ -f "ota_package.zip" ]] && [[ -s "ota_package.zip" ]]; then
-              PACKAGE_SIZE=$(stat -c%s "ota_package.zip")
-              echo "📦 Package size: $((PACKAGE_SIZE / 1024 / 1024)) MB (${PACKAGE_SIZE} bytes)"
-              
-              # Analyze ZIP structure
-              echo "🔍 Analyzing package structure..."
-              if unzip -l ota_package.zip 2>/dev/null | tee zip_contents.log; then
-                
-                # Locate payload.bin within ZIP
-                if grep -q "payload.bin" zip_contents.log; then
-                  echo "✅ payload.bin located in archive"
-                  
-                  # Extract payload.bin with multiple path attempts
-                  echo "📤 Extracting payload.bin..."
-                  (unzip -j ota_package.zip "*/payload.bin" -d . || \
-                   unzip -j ota_package.zip "payload.bin" -d . || \
-                   unzip -j ota_package.zip "**/payload.bin" -d .) 2>&1 | tee extract.log
-                  
-                  if [[ -f "payload.bin" ]] && [[ -s "payload.bin" ]]; then
-                    echo "✅ payload.bin extracted successfully"
-                    
-                    # Validate payload structure
-                    PAYLOAD_SIZE=$(stat -c%s "payload.bin")
-                    echo "💾 Payload size: $((PAYLOAD_SIZE / 1024 / 1024)) MB"
-                    
-                    # Check magic header
-                    MAGIC_HEADER=$(head -c 4 payload.bin | xxd -p)
-                    echo "🔍 Magic header: ${MAGIC_HEADER}"
-                    
-                    if [[ "${MAGIC_HEADER}" == "43724155" ]]; then
-                      echo "✅ Valid payload.bin magic header (CrAU) confirmed"
-                      
-                      # Execute local extraction
-                      echo "🚀 Processing local payload..."
-                      if timeout 1800 payload_dumper --partitions "${TARGET_PARTITIONS}" payload.bin 2>&1 | tee extraction_fallback.log; then
-                        EXTRACTION_SUCCESS=true
-                        echo "✅ Fallback extraction completed successfully"
-                      else
-                        echo "❌ Local extraction failed"
-                        cat extraction_fallback.log
-                      fi
-                    else
-                      echo "❌ Invalid payload magic header detected"
-                      echo "Expected: 43724155, Found: ${MAGIC_HEADER}"
-                      head -c 32 payload.bin | xxd
-                    fi
-                  else
-                    echo "❌ payload.bin extraction failed or file is empty"
-                  fi
-                else
-                  echo "❌ payload.bin not found in archive"
-                  echo "📋 Archive contents:"
-                  head -20 zip_contents.log
-                fi
-              else
-                echo "❌ Unable to analyze ZIP structure"
-              fi
-            else
-              echo "❌ Download verification failed - file missing or empty"
-            fi
-          else
-            echo "❌ Download operation failed"
-            cat download.log 2>/dev/null || true
-          fi
-        fi
-        
-        # Post-extraction validation and reporting
-        if [[ "${EXTRACTION_SUCCESS}" == "true" ]]; then
-          echo "🎉 Extraction pipeline completed successfully"
-          echo ""
-          echo "📋 Output inventory:"
-          ls -la *.img 2>/dev/null || echo "No .img files found"
-          
-          # Detailed partition verification
-          echo ""
-          echo "🔍 Partition validation:"
-          for PARTITION in $(echo "${TARGET_PARTITIONS}" | tr ',' ' '); do
-            IMG_FILE="${PARTITION}.img"
-            if [[ -f "${IMG_FILE}" ]] && [[ -s "${IMG_FILE}" ]]; then
-              FILE_SIZE=$(stat -c%s "${IMG_FILE}")
-              echo "✅ ${IMG_FILE}: ${FILE_SIZE} bytes ($((FILE_SIZE / 1024 / 1024)) MB)"
-              
-              # Specialized validation for boot partition
-              if [[ "${PARTITION}" == "boot" ]]; then
-                echo "   🔬 Boot image analysis:"
-                file "${IMG_FILE}" | sed 's/^/   /'
-                
-                # Android boot magic validation
-                BOOT_MAGIC=$(head -c 8 "${IMG_FILE}" | xxd -p)
-                if [[ "${BOOT_MAGIC}" =~ 414e44524f494421 ]]; then
-                  echo "   ✅ Valid Android boot magic detected"
-                else
-                  echo "   ⚠️ Non-standard boot format: ${BOOT_MAGIC}"
-                fi
-              fi
-            else
-              echo "❌ ${IMG_FILE}: Missing or empty"
-              exit 1
-            fi
-          done
-        else
-          echo "❌ Extraction pipeline failed completely"
-          echo ""
-          echo "🔍 Diagnostic information:"
-          echo "Working directory: $(pwd)"
-          echo "Files present:"
-          ls -la
-          echo ""
-          echo "Log files:"
-          for LOG_FILE in *.log; do
-            if [[ -f "${LOG_FILE}" ]]; then
-              echo "--- ${LOG_FILE} ---"
-              tail -20 "${LOG_FILE}"
-              echo ""
-            fi
-          done
-          exit 1
-        fi
-        
-    - name: Generate extraction metadata
-      working-directory: extracted_output
-      run: |
-        echo "📊 Generating extraction metadata..."
-        
-        # Create comprehensive summary
-        cat > extraction_summary.md << EOF
-        # OTA Extraction Report
-        
-        ## Configuration
-        - **Repository**: ${{ github.repository }}
-        - **Workflow Run**: ${{ github.run_id }}
-        - **Extraction Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        - **Target Partitions**: ${TARGET_PARTITIONS}
-        - **Source URL**: ${OTA_URL}
-        
-        ## Results
-        EOF
-        
-        # Document extracted partitions
-        echo "### Extracted Partitions" >> extraction_summary.md
-        echo "" >> extraction_summary.md
-        for IMG_FILE in *.img; do
-          if [[ -f "${IMG_FILE}" ]]; then
-            FILE_SIZE=$(stat -c%s "${IMG_FILE}")
-            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-            echo "- **${IMG_FILE}**: ${FILE_SIZE_MB} MB (${FILE_SIZE} bytes)" >> extraction_summary.md
-          fi
-        done
-        
-        # Generate checksums
-        echo "" >> extraction_summary.md
-        echo "### SHA256 Checksums" >> extraction_summary.md
-        echo "\`\`\`" >> extraction_summary.md
-        sha256sum *.img >> extraction_summary.md 2>/dev/null || echo "No image files for checksum" >> extraction_summary.md
-        echo "\`\`\`" >> extraction_summary.md
-        
-        # Add technical details
-        echo "" >> extraction_summary.md
-        echo "### Technical Details" >> extraction_summary.md
-        echo "- **Python Version**: $(python --version)" >> extraction_summary.md
-        echo "- **Payload Dumper**: $(pip show payload-dumper | grep Version || echo 'Custom build')" >> extraction_summary.md
-        echo "- **Runner OS**: $(uname -a)" >> extraction_summary.md
-        
-        echo "✅ Metadata generation completed"
-        cat extraction_summary.md
-        
-    - name: Upload extraction artifacts
+    # Bước 5: Tải lên các file kết quả (artifact)
+    # Công cụ sẽ tự động tạo thư mục 'output'
+    - name: Tải lên các file đã trích xuất
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.ARTIFACT_NAME }}
-        path: |
-          extracted_output/*.img
-          extracted_output/extraction_summary.md
-          extracted_output/*.log
-        retention-days: 30
-        compression-level: 6
-        if-no-files-found: error
-        
-    - name: Execution summary
+        name: extracted-${{ github.event.inputs.partition_selection }}-${{ github.run_id }}
+        path: output/
+        if-no-files-found: error # Báo lỗi nếu không tìm thấy file nào để tải lên
+        retention-days: 7 # Lưu trữ kết quả trong 7 ngày
+
+    # Bước 6: Dọn dẹp không gian làm việc sau khi hoàn tất
+    - name: Dọn dẹp
+      if: always() # Luôn chạy bước này, dù thành công hay thất bại
       run: |
-        echo ""
-        echo "🏁 === EXTRACTION PIPELINE COMPLETED ==="
-        echo ""
-        echo "📦 Artifact Details:"
-        echo "   • Name: ${ARTIFACT_NAME}"
-        echo "   • Retention: 30 days"
-        echo "   • Contents: Partition images + metadata + logs"
-        echo ""
-        echo "🔗 Access: Navigate to Actions tab → Select this run → Download artifacts"
-        echo ""
-        echo "⚡ Next Steps:"
-        echo "   • Verify partition integrity using provided checksums"
-        echo "   • Review extraction logs for any warnings"
-        echo "   • Use extracted images for your development workflow"
-        echo ""
+        echo "🧹 Dọn dẹp thư mục output..."
+        rm -rf output
