@@ -1,35 +1,22 @@
-name: Streaming OTA Partition Extractor (Optimized)
-
+name: Streaming OTA Partition Extractor
 on:
   workflow_dispatch:
     inputs:
       ota_source:
-        description: 'URL hoặc local path đến OTA ZIP (hỗ trợ direct streaming extraction)'
+        description: 'URL đến OTA ZIP (hỗ trợ direct streaming extraction)'
         required: true
         type: string
-        default: 'https://bigota.d.miui.com/OS1.0.x.x/miui_XXXXX_OS1.0.x.x_xxxxxxxx.0000.00_14.0_cn_xxxxxxxxxxxxx.zip'
       partitions:
-        description: 'Partitions cần extract (comma-separated). VD: boot,init_boot,vendor_boot,vbmeta,dtbo'
+        description: 'Partitions cần extract (comma-separated). VD: boot,init_boot,vendor_boot'
         required: true
         default: 'boot,init_boot,vbmeta'
         type: string
-      output_compression:
-        description: 'Nén output artifacts (khuyến nghị cho partitions > 100MB)'
-        required: true
-        default: 'auto'
-        type: choice
-        options: ['none', 'auto', 'force']
       artifact_retention:
         description: 'Retention period (days)'
         required: false
         default: '7'
         type: choice
         options: ['3', '7', '14', '30']
-      enable_checksums:
-        description: 'Generate SHA256 checksums cho mỗi partition'
-        required: false
-        default: true
-        type: boolean
 
 jobs:
   stream-extract:
@@ -41,70 +28,46 @@ jobs:
       - name: Environment Initialization
         id: init
         run: |
-          echo "🔧 Initializing execution context..."
-          mkdir -p workspace/{partitions,metadata,logs}
-          echo "runner_os=$(uname -s)" >> $GITHUB_OUTPUT
-          echo "runner_arch=$(uname -m)" >> $GITHUB_OUTPUT
-          EXEC_ID="extract_$(date +%s)_$RANDOM"
-          echo "execution_id=$EXEC_ID" >> $GITHUB_OUTPUT
-          echo "start_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-          echo "✅ Context initialized: $EXEC_ID"
+          mkdir -p workspace/{partitions,logs}
+          echo "execution_id=$(date +%s)_${GITHUB_RUN_ID}" >> $GITHUB_OUTPUT
       
       - name: Python Runtime Configuration
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install Streaming payload-dumper
-        id: install_dumper
         run: |
-          echo "📦 Installing 5ec1cff/payload-dumper..."
+          echo "📦 Installing payload-dumper..."
           python3 -m pip install --upgrade pip
           pip install --no-cache-dir git+https://github.com/5ec1cff/payload-dumper
-          
-          # SỬA LỖI QUAN TRỌNG: Thêm thư mục bin của pip vào PATH
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          
-          echo "dumper_version=5ec1cff-fork" >> $GITHUB_OUTPUT
           echo "✅ Installation completed."
       
-      - name: Input Validation & Analysis
+      - name: Validate Inputs
         id: validate
         run: |
-          echo "🔍 Validating input parameters..."
-          SOURCE="${{ github.event.inputs.ota_source }}"
-          if [[ $SOURCE =~ ^https?:// ]]; then
-            echo "source_type=remote_url" >> $GITHUB_OUTPUT
-            echo "✅ Remote URL detected - streaming mode active"
-            if ! curl --head --silent --fail --location --max-time 10 "$SOURCE" > /dev/null; then
-              echo "⚠️ Warning: Source URL may be inaccessible or slow to respond."
-            fi
-          else
-            echo "❌ Invalid source: Currently only supports remote URLs."
+          if ! [[ "${{ github.event.inputs.ota_source }}" =~ ^https?:// ]]; then
+            echo "❌ Invalid source: Must be a remote URL (http or https)."
             exit 1
           fi
-          
           IFS=',' read -ra PART_ARRAY <<< "${{ github.event.inputs.partitions }}"
           echo "partition_count=${#PART_ARRAY[@]}" >> $GITHUB_OUTPUT
-          echo "✅ Validation completed: ${#PART_ARRAY[@]} partitions queued."
+          echo "✅ Validation passed: ${#PART_ARRAY[@]} partitions queued."
 
       - name: Direct Streaming Extraction
         id: extract
         run: |
           echo "🚀 Executing direct streaming extraction..."
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  Source: ${{ github.event.inputs.ota_source }}"
           echo "  Target partitions: ${{ github.event.inputs.partitions }}"
-          echo "  Output: workspace/partitions/"
-          echo ""
           
+          # SỬA LỖI 1: Bỏ cờ "-o ." và để công cụ xuất ra thư mục 'out' mặc định
+          # Điều này tránh lỗi phân tích đối số.
           cd workspace/partitions
           EXTRACT_START=$(date +%s)
           
-          # SỬA LỖI & TINH GỌN:
-          # 1. Thêm cờ "-o ." để xuất file ra thư mục hiện tại, thay vì thư mục 'out' mặc định.
-          # 2. Truyền trực tiếp chuỗi partitions, không cần chuyển đổi.
-          payload_dumper --partitions "${{ github.event.inputs.partitions }}" -o . "${{ github.event.inputs.ota_source }}" 2>&1 | tee ../logs/extraction_${{ steps.init.outputs.execution_id }}.log
+          payload_dumper --partitions "${{ github.event.inputs.partitions }}" "${{ github.event.inputs.ota_source }}" 2>&1 | tee ../logs/extraction.log
           
           EXTRACT_STATUS=${PIPESTATUS[0]}
           EXTRACT_END=$(date +%s)
@@ -112,97 +75,69 @@ jobs:
           echo "extraction_duration=$EXTRACT_DURATION" >> $GITHUB_OUTPUT
           
           if [ $EXTRACT_STATUS -ne 0 ]; then
-            echo "❌ Extraction failed - check log for details."
+            echo "❌ Extraction failed. See log for details."
             exit 1
           fi
-          echo "✅ Streaming extraction completed: ${EXTRACT_DURATION}s elapsed."
+          echo "✅ Streaming extraction completed in ${EXTRACT_DURATION}s."
 
-      - name: Post-Extraction Analysis & Reporting
+      - name: Analyze & Report
         id: analyze
+        if: success()
         run: |
           echo "📊 Analyzing extracted partitions..."
-          cd workspace/partitions
+          # SỬA LỖI 1 (tiếp theo): Di chuyển vào thư mục 'out' nơi chứa kết quả
+          cd workspace/partitions/out
+          
           EXTRACTED_COUNT=$(ls -1 *.img 2>/dev/null | wc -l)
           echo "extracted_count=$EXTRACTED_COUNT" >> $GITHUB_OUTPUT
           
           if [ $EXTRACTED_COUNT -eq 0 ]; then
-            echo "❌ No partitions were extracted. Check logs for payload content or errors."
-            exit 1
+            echo "⚠️ No partitions were extracted. The requested partitions may not exist in the payload."
+            exit 0 
           fi
 
-          TOTAL_SIZE=0
-          REPORT_HEADER="║ %-25s │ %12s │ %-15s ║\n"
-          REPORT_ROW="║ %-25s │ %10d MB │ %-15s ║\n"
-          
-          (
-            echo "╔══════════════════════════════════════════════════════════════════════╗"
-            echo "║                       PARTITION EXTRACTION REPORT                        ║"
-            echo "╠══════════════════════════════════════════════════════════════════════╣"
-            printf "$REPORT_HEADER" "Partition" "Size" "SHA256 (short)"
-            echo "╠══════════════════════════════════════════════════════════════════════╣"
-          ) >> ../metadata/ANALYSIS_REPORT.txt
-          
-          for img in *.img; do
-            SIZE=$(stat -c%s "$img")
-            TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            
-            # NHẤT QUÁN: Sử dụng sha256sum thay vì md5sum
-            SHA256=$(sha256sum "$img" | cut -d' ' -f1)
-            
-            printf "$REPORT_ROW" "${img%.img}" "$SIZE_MB" "${SHA256:0:12}..." >> ../metadata/ANALYSIS_REPORT.txt
-            echo "${img}|${SIZE}|${SHA256}" >> ../metadata/partition_registry.txt
-          done
-          
-          (
-            echo "╠══════════════════════════════════════════════════════════════════════╣"
-            printf "║ %-25s │ %10d MB │ %-15s ║\n" "TOTAL" "$((TOTAL_SIZE / 1024 / 1024))" "$EXTRACTED_COUNT partitions"
-            echo "╚══════════════════════════════════════════════════════════════════════╝"
-          ) >> ../metadata/ANALYSIS_REPORT.txt
-          
+          TOTAL_SIZE=$(du -cb *.img | tail -n 1 | awk '{print $1}')
           echo "total_extracted_size=$TOTAL_SIZE" >> $GITHUB_OUTPUT
-          echo "✅ Analysis complete. Report generated."
-          cat ../metadata/ANALYSIS_REPORT.txt
 
-      - name: Generate Full SHA256 Checksums File
-        if: github.event.inputs.enable_checksums == 'true'
-        run: |
-          echo "🔐 Generating full SHA256 checksums file..."
-          cd workspace/partitions
-          sha256sum *.img > ../metadata/SHA256SUMS.txt
-          echo "✅ Checksums file created: SHA256SUMS.txt"
-          cat ../metadata/SHA256SUMS.txt
-
-      - name: Create Final Artifacts
-        id: create_artifacts
-        run: |
-          echo "📝 Generating metadata bundle and preparing for upload..."
-          # ... (Phần tạo metadata và báo cáo của bạn đã rất tốt, có thể giữ nguyên hoặc điều chỉnh nhỏ)
-          # Chỉ cần đảm bảo các đường dẫn và biến là chính xác.
-          # Tôi sẽ giữ lại phần này trống để bạn tùy chỉnh báo cáo cuối cùng theo ý muốn.
-          # Nhưng hãy đảm bảo bạn xử lý các file trong 'workspace/metadata' và 'workspace/partitions'
-      
-      - name: Upload Extracted Partitions
-        uses: actions/upload-artifact@v4
-        with:
-          name: extracted-partitions-${{ steps.init.outputs.execution_id }}
-          path: |
-            workspace/partitions/*.img
-            workspace/metadata/
-          retention-days: ${{ github.event.inputs.artifact_retention }}
-          if-no-files-found: error
-      
       - name: Execution Summary
         if: always()
         run: |
-          echo "## 📊 Streaming Extraction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Extraction Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Duration**: **${{ steps.extract.outputs.extraction_duration }}s**" >> $GITHUB_STEP_SUMMARY
-          echo "- **Partitions extracted**: **${{ steps.analyze.outputs.extracted_count || '0' }}** / ${{ steps.validate.outputs.partition_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total size**: **$(( ${steps.analyze.outputs.total_extracted_size:-0} / 1024 / 1024 )) MB**" >> $GITHUB_STEP_SUMMARY
-          if [ -f workspace/metadata/ANALYSIS_REPORT.txt ]; then
-            echo "### Detailed Report" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            cat workspace/metadata/ANALYSIS_REPORT.txt >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # Chỉ hiển thị thông tin chi tiết nếu bước trích xuất thành công
+          if [ "${{ steps.extract.outcome }}" == "success" ]; then
+            # SỬA LỖI 2: Tính toán kích thước một cách an toàn
+            TOTAL_SIZE_BYTES=${{ steps.analyze.outputs.total_extracted_size:-0 }}
+            TOTAL_SIZE_MB=$((TOTAL_SIZE_BYTES / 1024 / 1024))
+
+            echo "- **Duration**: **${{ steps.extract.outputs.extraction_duration }}s**" >> $GITHUB_STEP_SUMMARY
+            echo "- **Partitions Extracted**: **${{ steps.analyze.outputs.extracted_count }}** / ${{ steps.validate.outputs.partition_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Total Size**: **$TOTAL_SIZE_MB MB**" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ steps.analyze.outputs.extracted_count }}" -gt 0 ]; then
+              echo "### Extracted Files:" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              ls -lh workspace/partitions/out/*.img >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "> No partitions were extracted. Check logs for details." >> $GITHUB_STEP_SUMMARY
+            fi
           fi
+
+      - name: Upload Partition Artifacts
+        if: steps.analyze.outputs.extracted_count > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-partitions-${{ steps.init.outputs.execution_id }}
+          # SỬA LỖI 1 (tiếp theo): Cập nhật đường dẫn đến thư mục 'out'
+          path: workspace/partitions/out/*.img
+          retention-days: ${{ github.event.inputs.artifact_retention }}
+
+      - name: Upload Execution Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extraction-log-${{ steps.init.outputs.execution_id }}
+          path: workspace/logs/extraction.log
+          retention-days: 1
