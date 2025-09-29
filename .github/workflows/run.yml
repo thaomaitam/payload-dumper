@@ -103,7 +103,7 @@ jobs:
       - name: Execution Summary
         if: always()
         run: |
-          echo "## 📊 Extraction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "##Extraction Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           
           # Chỉ hiển thị thông tin chi tiết nếu bước trích xuất thành công
