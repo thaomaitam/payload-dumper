@@ -1,4 +1,5 @@
-name: Streaming OTA Partition Extractor
+name: Streaming OTA Partition Extractor (Fixed & Improved)
+
 on:
   workflow_dispatch:
     inputs:
