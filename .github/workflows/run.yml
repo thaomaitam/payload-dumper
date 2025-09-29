@@ -1,4 +1,4 @@
-name: Streaming OTA Partition Extractor (Fixed & Improved)
+name: Streaming OTA Partition Extractor (Final Version)
 
 on:
   workflow_dispatch:
@@ -63,8 +63,6 @@ jobs:
           echo "  Source: ${{ github.event.inputs.ota_source }}"
           echo "  Target partitions: ${{ github.event.inputs.partitions }}"
           
-          # SỬA LỖI 1: Bỏ cờ "-o ." và để công cụ xuất ra thư mục 'out' mặc định
-          # Điều này tránh lỗi phân tích đối số.
           cd workspace/partitions
           EXTRACT_START=$(date +%s)
           
@@ -86,7 +84,6 @@ jobs:
         if: success()
         run: |
           echo "📊 Analyzing extracted partitions..."
-          # SỬA LỖI 1 (tiếp theo): Di chuyển vào thư mục 'out' nơi chứa kết quả
           cd workspace/partitions/out
           
           EXTRACTED_COUNT=$(ls -1 *.img 2>/dev/null | wc -l)
@@ -94,6 +91,8 @@ jobs:
           
           if [ $EXTRACTED_COUNT -eq 0 ]; then
             echo "⚠️ No partitions were extracted. The requested partitions may not exist in the payload."
+            # Gán giá trị 0 để các bước sau không bị lỗi
+            echo "total_extracted_size=0" >> $GITHUB_OUTPUT
             exit 0 
           fi
 
@@ -103,14 +102,13 @@ jobs:
       - name: Execution Summary
         if: always()
         run: |
-          echo "##Extraction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Extraction Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           
-          # Chỉ hiển thị thông tin chi tiết nếu bước trích xuất thành công
           if [ "${{ steps.extract.outcome }}" == "success" ]; then
-            # SỬA LỖI 2: Tính toán kích thước một cách an toàn
-            TOTAL_SIZE_BYTES=${{ steps.analyze.outputs.total_extracted_size:-0 }}
-            TOTAL_SIZE_MB=$((TOTAL_SIZE_BYTES / 1024 / 1024))
+            # ĐÃ SỬA LỖI CÚ PHÁP
+            TOTAL_SIZE_BYTES="${{ steps.analyze.outputs.total_extracted_size }}"
+            TOTAL_SIZE_MB=$(( ${TOTAL_SIZE_BYTES:-0} / 1024 / 1024 ))
 
             echo "- **Duration**: **${{ steps.extract.outputs.extraction_duration }}s**" >> $GITHUB_STEP_SUMMARY
             echo "- **Partitions Extracted**: **${{ steps.analyze.outputs.extracted_count }}** / ${{ steps.validate.outputs.partition_count }}" >> $GITHUB_STEP_SUMMARY
@@ -131,7 +129,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: extracted-partitions-${{ steps.init.outputs.execution_id }}
-          # SỬA LỖI 1 (tiếp theo): Cập nhật đường dẫn đến thư mục 'out'
           path: workspace/partitions/out/*.img
           retention-days: ${{ github.event.inputs.artifact_retention }}
 
