@@ -1,141 +1,71 @@
-name: Streaming OTA Partition Extractor (Final Version)
+name: Extract Boot Images from OTA
 
 on:
   workflow_dispatch:
     inputs:
-      ota_source:
-        description: 'URL đến OTA ZIP (hỗ trợ direct streaming extraction)'
+      ota_url:
+        description: 'OTA Package URL'
         required: true
-        type: string
+        default: 'https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS2.0.215.0.VMBCNXM/nuwa-ota_full-OS2.0.215.0.VMBCNXM-user-15.0-03badd90e8.zip'
       partitions:
-        description: 'Partitions cần extract (comma-separated). VD: boot,init_boot,vendor_boot'
+        description: 'Partitions to extract (comma-separated)'
         required: true
-        default: 'boot,init_boot,vbmeta'
-        type: string
-      artifact_retention:
-        description: 'Retention period (days)'
-        required: false
-        default: '7'
-        type: choice
-        options: ['3', '7', '14', '30']
+        default: 'boot,dtbo,init_boot,vbmeta,vendor_boot'
+      release_tag:
+        description: 'Release tag name'
+        required: true
+        default: 'v1.0'
 
 jobs:
-  stream-extract:
-    name: Direct Streaming Extraction
+  extract-images:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
     
     steps:
-      - name: Environment Initialization
-        id: init
-        run: |
-          mkdir -p workspace/{partitions,logs}
-          echo "execution_id=$(date +%s)_${GITHUB_RUN_ID}" >> $GITHUB_OUTPUT
+      - name: Checkout repository
+        uses: actions/checkout@v4
       
-      - name: Python Runtime Configuration
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Streaming payload-dumper
-        run: |
-          echo "📦 Installing payload-dumper..."
-          python3 -m pip install --upgrade pip
-          pip install --no-cache-dir git+https://github.com/5ec1cff/payload-dumper
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          echo "✅ Installation completed."
       
-      - name: Validate Inputs
-        id: validate
+      - name: Install payload-dumper
+        run: pip install git+https://github.com/5ec1cff/payload-dumper
+      
+      - name: Extract partition images (streaming from URL)
         run: |
-          if ! [[ "${{ github.event.inputs.ota_source }}" =~ ^https?:// ]]; then
-            echo "❌ Invalid source: Must be a remote URL (http or https)."
-            exit 1
-          fi
-          IFS=',' read -ra PART_ARRAY <<< "${{ github.event.inputs.partitions }}"
-          echo "partition_count=${#PART_ARRAY[@]}" >> $GITHUB_OUTPUT
-          echo "✅ Validation passed: ${#PART_ARRAY[@]} partitions queued."
-
-      - name: Direct Streaming Extraction
-        id: extract
-        run: |
-          echo "🚀 Executing direct streaming extraction..."
-          echo "  Source: ${{ github.event.inputs.ota_source }}"
-          echo "  Target partitions: ${{ github.event.inputs.partitions }}"
+          payload_dumper --partitions ${{ github.event.inputs.partitions }} \
+            "${{ github.event.inputs.ota_url }}"
           
-          cd workspace/partitions
-          EXTRACT_START=$(date +%s)
+          echo "=== Extracted files ==="
+          ls -lh out/
           
-          payload_dumper --partitions "${{ github.event.inputs.partitions }}" "${{ github.event.inputs.ota_source }}" 2>&1 | tee ../logs/extraction.log
-          
-          EXTRACT_STATUS=${PIPESTATUS[0]}
-          EXTRACT_END=$(date +%s)
-          EXTRACT_DURATION=$((EXTRACT_END - EXTRACT_START))
-          echo "extraction_duration=$EXTRACT_DURATION" >> $GITHUB_OUTPUT
-          
-          if [ $EXTRACT_STATUS -ne 0 ]; then
-            echo "❌ Extraction failed. See log for details."
-            exit 1
-          fi
-          echo "✅ Streaming extraction completed in ${EXTRACT_DURATION}s."
-
-      - name: Analyze & Report
-        id: analyze
-        if: success()
-        run: |
-          echo "📊 Analyzing extracted partitions..."
-          cd workspace/partitions/out
-          
-          EXTRACTED_COUNT=$(ls -1 *.img 2>/dev/null | wc -l)
-          echo "extracted_count=$EXTRACTED_COUNT" >> $GITHUB_OUTPUT
-          
-          if [ $EXTRACTED_COUNT -eq 0 ]; then
-            echo "⚠️ No partitions were extracted. The requested partitions may not exist in the payload."
-            # Gán giá trị 0 để các bước sau không bị lỗi
-            echo "total_extracted_size=0" >> $GITHUB_OUTPUT
-            exit 0 
-          fi
-
-          TOTAL_SIZE=$(du -cb *.img | tail -n 1 | awk '{print $1}')
-          echo "total_extracted_size=$TOTAL_SIZE" >> $GITHUB_OUTPUT
-
-      - name: Execution Summary
-        if: always()
-        run: |
-          echo "## Extraction Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.extract.outcome }}" == "success" ]; then
-            # ĐÃ SỬA LỖI CÚ PHÁP
-            TOTAL_SIZE_BYTES="${{ steps.analyze.outputs.total_extracted_size }}"
-            TOTAL_SIZE_MB=$(( ${TOTAL_SIZE_BYTES:-0} / 1024 / 1024 ))
-
-            echo "- **Duration**: **${{ steps.extract.outputs.extraction_duration }}s**" >> $GITHUB_STEP_SUMMARY
-            echo "- **Partitions Extracted**: **${{ steps.analyze.outputs.extracted_count }}** / ${{ steps.validate.outputs.partition_count }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Total Size**: **$TOTAL_SIZE_MB MB**" >> $GITHUB_STEP_SUMMARY
+          cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: partition-images-${{ github.event.inputs.release_tag }}
+          path: out/
+          retention-days: 30
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: Partition Images ${{ github.event.inputs.release_tag }}
+          body: |
+            ## Extracted Partition Images
             
-            if [ "${{ steps.analyze.outputs.extracted_count }}" -gt 0 ]; then
-              echo "### Extracted Files:" >> $GITHUB_STEP_SUMMARY
-              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-              ls -lh workspace/partitions/out/*.img >> $GITHUB_STEP_SUMMARY
-              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "> No partitions were extracted. Check logs for details." >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
-
-      - name: Upload Partition Artifacts
-        if: steps.analyze.outputs.extracted_count > 0
-        uses: actions/upload-artifact@v4
-        with:
-          name: extracted-partitions-${{ steps.init.outputs.execution_id }}
-          path: workspace/partitions/out/*.img
-          retention-days: ${{ github.event.inputs.artifact_retention }}
-
-      - name: Upload Execution Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: extraction-log-${{ steps.init.outputs.execution_id }}
-          path: workspace/logs/extraction.log
-          retention-days: 1
+            **OTA Source:** `${{ github.event.inputs.ota_url }}`
+            **Partitions:** ${{ github.event.inputs.partitions }}
+            
+            ### SHA256 Checksums
+            ```
+            $(cat out/SHA256SUMS.txt)
+            ```
+          files: |
+            out/*.img
+            out/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
