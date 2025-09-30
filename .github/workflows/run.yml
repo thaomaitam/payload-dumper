@@ -34,6 +34,7 @@ jobs:
       
       - name: Extract partition images (streaming from URL)
         run: |
+          mkdir -p out
           payload_dumper --partitions ${{ github.event.inputs.partitions }} \
             "${{ github.event.inputs.ota_url }}"
           
